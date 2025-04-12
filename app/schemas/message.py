@@ -20,6 +20,10 @@ class MensajeSanitizadoResponse(BaseModel):
     contenido_sanitizado: str
     metadata_sanitizada: Dict[str, Any]
     created_at: datetime
+    # Campos adicionales para la respuesta del LLM
+    llm_respuesta: Optional[str] = None
+    llm_mensaje_id: Optional[int] = None
+    llm_metadata: Optional[Dict[str, Any]] = None
 
 # Nuevos esquemas para activar chatbot y enviar mensajes
 class ChatbotActivacionCreate(BaseModel):

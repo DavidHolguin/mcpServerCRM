@@ -33,30 +33,139 @@ async def sanitize_message(
     db: Session = Depends(get_db)
 ):
     """
-    Sanitiza un mensaje y lo prepara para procesamiento por LLM
+    Sanitiza un mensaje, lo procesa con el LLM y devuelve tanto el mensaje sanitizado como la respuesta del LLM.
+    Todo en una sola llamada.
     """
-    # Generar token anónimo para el lead si no existe
-    token_anonimo = mcp_handler.create_pii_token(db, message.lead_id)
-    
-    # Sanitizar y guardar mensaje
-    mensaje_sanitizado = mcp_handler.save_sanitized_message(
-        db=db,
-        mensaje_id=uuid.uuid4().int >> 64,  # Generar ID temporal
-        token_anonimo=token_anonimo,
-        contenido_original=message.contenido,
-        metadata=message.metadata or {}
-    )
-    
-    # Actualizar contexto conversacional
-    mcp_handler.update_conversation_context(
-        db=db,
-        token_anonimo=token_anonimo,
-        tipo_contexto="mensaje_usuario",
-        contenido=mensaje_sanitizado.contenido_sanitizado,
-        relevancia=1.0  # Alta relevancia para mensajes recientes
-    )
-    
-    return mensaje_sanitizado
+    try:
+        from ....models.chat import Conversacion, Mensaje, Chatbot
+        
+        # Verificar si existe una conversación activa
+        conversacion = db.query(Conversacion).filter(
+            Conversacion.lead_id == message.lead_id,
+            Conversacion.chatbot_id == message.chatbot_id,
+            Conversacion.estado == "activo"
+        ).first()
+        
+        # Si no existe conversación, crearla
+        if not conversacion:
+            conversacion = Conversacion(
+                lead_id=message.lead_id,
+                chatbot_id=message.chatbot_id,
+                canal_id=message.canal_id,
+                estado="activo",
+                chatbot_activo=True,
+                ultimo_mensaje=datetime.now(),
+                metadata={}
+            )
+            db.add(conversacion)
+            db.commit()
+            db.refresh(conversacion)
+        
+        # 1. Generar token anónimo para el lead si no existe
+        token_anonimo = mcp_handler.create_pii_token(db, message.lead_id)
+        
+        # 2. Sanitizar el mensaje - IMPORTANTE: Este es el paso clave
+        mensaje_sanitizado = mcp_handler.save_sanitized_message(
+            db=db,
+            mensaje_id=uuid.uuid4().int >> 64,  # ID temporal que se actualizará después
+            token_anonimo=token_anonimo,
+            contenido_original=message.contenido,
+            metadata=message.metadata or {}
+        )
+        
+        # 3. Guardar el mensaje con el contenido original en la tabla de mensajes
+        mensaje_usuario = Mensaje(
+            conversacion_id=conversacion.id,
+            origen="usuario",
+            remitente_id=message.lead_id,
+            contenido=message.contenido,  # Contenido original
+            tipo_contenido="texto",
+            metadata=message.metadata or {},
+            leido=False,
+            created_at=datetime.now()
+        )
+        db.add(mensaje_usuario)
+        db.commit()
+        db.refresh(mensaje_usuario)
+        
+        # 4. Actualizar el ID del mensaje sanitizado con el ID real del mensaje
+        from ....models.chat import MensajeSanitizado
+        db.query(MensajeSanitizado).filter(
+            MensajeSanitizado.id == mensaje_sanitizado.id
+        ).update({
+            "mensaje_id": mensaje_usuario.id
+        })
+        db.commit()
+        
+        # 5. Actualizar timestamp de último mensaje en la conversación
+        conversacion.ultimo_mensaje = datetime.now()
+        db.commit()
+        
+        # 6. Actualizar contexto conversacional con el CONTENIDO SANITIZADO
+        mcp_handler.update_conversation_context(
+            db=db,
+            token_anonimo=token_anonimo,
+            tipo_contexto="mensaje_usuario",
+            contenido=mensaje_sanitizado.contenido_sanitizado,  # Usamos el contenido sanitizado
+            relevancia=1.0  # Alta relevancia para mensajes recientes
+        )
+        
+        # 7. Verificar si el chatbot está activo para esta conversación
+        if not conversacion.chatbot_activo:
+            # Si el chatbot no está activo, devolvemos solo el mensaje sanitizado sin respuesta LLM
+            return MensajeSanitizadoResponse(
+                id=mensaje_sanitizado.id,
+                token_anonimo=mensaje_sanitizado.token_anonimo,
+                contenido_sanitizado=mensaje_sanitizado.contenido_sanitizado,
+                metadata_sanitizada=mensaje_sanitizado.metadata_sanitizada,
+                created_at=mensaje_sanitizado.created_at
+            )
+        
+        # 8. Procesar con el LLM si el chatbot está activo
+        # IMPORTANTE: Pasamos el contenido sanitizado al LLM
+        respuesta_llm = llm_handler.process_message(
+            db=db,
+            chatbot_id=message.chatbot_id,
+            token_anonimo=token_anonimo,
+            contenido_sanitizado=mensaje_sanitizado.contenido_sanitizado  # Usamos el contenido sanitizado
+        )
+        
+        # 9. Guardar la respuesta del LLM como mensaje en la base de datos
+        mensaje_respuesta = Mensaje(
+            conversacion_id=conversacion.id,
+            origen="chatbot",
+            remitente_id=message.chatbot_id,
+            contenido=respuesta_llm["respuesta"],
+            tipo_contenido="texto",
+            metadata=respuesta_llm.get("metadata", {}),
+            leido=False,
+            created_at=datetime.now()
+        )
+        db.add(mensaje_respuesta)
+        db.commit()
+        db.refresh(mensaje_respuesta)
+        
+        # 10. Actualizar timestamp de último mensaje en la conversación
+        conversacion.ultimo_mensaje = datetime.now()
+        db.commit()
+        
+        # 11. Devolver respuesta completa
+        return MensajeSanitizadoResponse(
+            id=mensaje_sanitizado.id,
+            token_anonimo=mensaje_sanitizado.token_anonimo,
+            contenido_sanitizado=mensaje_sanitizado.contenido_sanitizado,
+            metadata_sanitizada=mensaje_sanitizado.metadata_sanitizada,
+            created_at=mensaje_sanitizado.created_at,
+            llm_respuesta=respuesta_llm["respuesta"],
+            llm_mensaje_id=mensaje_respuesta.id,
+            llm_metadata=respuesta_llm.get("metadata", {})
+        )
+        
+    except Exception as e:
+        db.rollback()
+        import traceback
+        error_detail = traceback.format_exc()
+        raise HTTPException(status_code=500, detail=f"Error al procesar el mensaje: {str(e)}\n{error_detail}")
 
 @router.post("/activar-chatbot", response_model=ChatbotActivacionResponse)
 async def activar_chatbot_lead(
