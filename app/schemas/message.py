@@ -21,6 +21,38 @@ class MensajeSanitizadoResponse(BaseModel):
     metadata_sanitizada: Dict[str, Any]
     created_at: datetime
 
+# Nuevos esquemas para activar chatbot y enviar mensajes
+class ChatbotActivacionCreate(BaseModel):
+    lead_id: int
+    chatbot_id: int
+    estado: bool = True
+    metadata: Optional[Dict[str, Any]] = None
+
+class ChatbotActivacionResponse(BaseModel):
+    lead_id: int
+    chatbot_id: int
+    conversacion_id: int
+    estado: bool
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+class MensajeFrontendCreate(BaseModel):
+    lead_id: int
+    contenido: str
+    canal_id: Optional[int] = None
+    tipo_contenido: str = "texto"
+    metadata: Optional[Dict[str, Any]] = None
+    
+class MensajeFrontendResponse(BaseModel):
+    id: int
+    conversacion_id: int
+    contenido: str
+    origen: str
+    remitente_id: Optional[int] = None
+    tipo_contenido: str
+    created_at: datetime
+    respuesta_chatbot: Optional[Dict[str, Any]] = None
+
 class ChatbotContextoBase(BaseModel):
     tipo: str
     contenido: str
